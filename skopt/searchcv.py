@@ -575,3 +575,274 @@ class BayesSearchCV(sk_model_sel.BaseSearchCV):
                     groups=groups, n_jobs=n_jobs_adjusted
                 )
                 n_iter -= n_jobs
+
+
+
+from sklearn.base import BaseEstimator, TransformerMixin, clone
+from sklearn.pipeline import make_union, make_pipeline, Pipeline
+from sklearn.preprocessing import Imputer, StandardScaler
+from sklearn.linear_model import Lasso
+from sklearn.tree import DecisionTreeRegressor, DecisionTreeClassifier
+from sklearn.ensemble import GradientBoostingRegressor, GradientBoostingClassifier
+from sklearn.svm import LinearSVR, LinearSVC
+
+from .space import Real, Integer, Categorical
+
+
+class ColumnSelector(BaseEstimator, TransformerMixin):
+    """Selects a single column with index `key` from some matrix X"""
+    def __init__(self, key):
+        self.key = key
+
+    def fit(self, X, y=None):
+        return self  # do nothing during fitting procedure
+
+    def transform(self, data_matrix):
+        return data_matrix[:, [self.key]]  # return a matrix with single column
+
+
+class OneHotEncoder(BaseEstimator, TransformerMixin):
+    """Assumes that input X to fit and transform is a single
+    column matrix of categorical values."""
+    def fit(self, X, y=None):
+        # determine unique labels
+        self.elements = np.unique(X[:, 0])
+        self.elements.sort()
+        return self
+
+    def transform(self, X, y=None):
+        return np.column_stack([X[:,0] == e for e in self.elements])*1.0
+
+
+TYPE_FLOAT_MISSING = "TYPE_FLOAT_MISSING"
+TYPE_FLOAT = "TYPE_FLOAT"
+TYPE_CATEGORY = "TYPE_CATEGORY"
+
+
+def column_type(c):
+    """Get the type ot the column.
+
+    Parameters
+    ----------
+    c: np.ndarray
+        Numpy vector with column contents.
+
+    Returns
+    -------
+    type : detected type of column.
+    """
+
+    if (c.dtype.type is np.string_) or (c.dtype.type is np.str_):
+        return TYPE_CATEGORY
+
+    try:
+        c = c.astype('float')
+        if np.any(np.isnan(c)):
+            return TYPE_FLOAT_MISSING
+        else:
+            return TYPE_FLOAT
+    except BaseException as ex:
+        pass
+
+    return TYPE_CATEGORY
+
+
+def regression_pipeline(features, kwargs={}):
+    """Create BayesSearchCV instance that can be used to perform
+    parameter search over multiple classes of predictive models
+    for a regression task.
+
+    Parameters
+    ----------
+    features: TransformerMixin
+        Transformer that does preprocessing of data.
+
+    kwargs: dict
+        Extra arguments that are to be passed to the BayesSearchCV
+        instance.
+
+    Returns
+    -------
+    model : BayesSearchCV instance with preconfigured search spaces.
+    """
+
+    # relatively quick to train estimators are used
+    return BayesSearchCV(
+        estimator=Pipeline([
+            ('features', clone(features)),
+            ('scaler', StandardScaler()),
+            ('model', Lasso()),
+        ]),
+        search_spaces=[
+            {
+                'model': Categorical([DecisionTreeRegressor()]),
+                'model__max_depth': Integer(1, 32),
+                'model__min_samples_split': Real(1e-10, 0.5, 'log-uniform'),
+            },
+            {
+                'model': Categorical([Lasso()]),
+                'model__alpha': Real(1e-10, 1e+10, 'log-uniform')
+            },
+            {
+                'model': Categorical([GradientBoostingRegressor()]),
+                'model__learning_rate': Real(1e-5, 1.0, 'log-uniform'),
+                'model__n_estimators': Integer(1, 1024),
+            }
+        ],
+        **kwargs
+    )
+
+def classification_pipeline(features, kwargs):
+    """Create BayesSearchCV instance that can be used to perform
+    parameter search over multiple classes of predictive models
+    for a classification task.
+
+    Parameters
+    ----------
+    features: TransformerMixin
+        Transformer that does preprocessing of data.
+
+    kwargs: dict
+        Extra arguments that are to be passed to the BayesSearchCV
+        instance.
+
+    Returns
+    -------
+    model : BayesSearchCV instance with preconfigured search spaces.
+    """
+
+    # relatively quick to train estimators are used
+    return BayesSearchCV(
+        estimator=Pipeline([
+            ('features', clone(features)),
+            ('scaler', StandardScaler()),
+            ('model', LinearSVC()),
+        ]),
+        search_spaces=[
+            {
+                'model': Categorical([DecisionTreeClassifier()]),
+                'model__max_depth': Integer(1, 32),
+                'model__min_samples_split': Real(1e-10, 0.5, 'log-uniform'),
+            },
+            {
+                'model': Categorical([LinearSVC(max_iter=10000, dual=False)]),
+                'model__C': Real(1e-10, 1e+10, 'log-uniform')
+            },
+            {
+                'model': Categorical([GradientBoostingClassifier()]),
+                'model__learning_rate': Real(1e-5, 1.0, 'log-uniform'),
+                'model__n_estimators': Integer(1, 1024),
+            }
+        ],
+        **kwargs
+    )
+
+
+class SkoptEstimator(BaseEstimator):
+    """Automatically detect type of columns in the input dataset represented
+    as numpy array of type object, automatically detect the type of learning
+    problem from the type of output, and perform search within applicable
+    models efficiently using BayesSearchCV.
+
+    The vision is that the class is used for fast prototyping.
+
+    After search is done, the model can be used just like a regular scikit-
+    learn estimator.
+
+    Parameters
+    ----------
+    search_cv_kwargs : dict
+        Possible parameters to be passed to BayesSearchCV instance.
+
+    Example
+    -------
+    import numpy as np
+
+    from sklearn.model_selection import train_test_split
+    from skopt.searchcv import SkoptEstimator
+
+    # generate dummy dataset
+    X = np.random.randn(128,10).astype("object")
+    X[:, 0] = (X[:, 0] > 0.0).astype('str')  # categorical column
+    y = np.random.randn(128) > 0.0
+
+    # if output label is of type str, classification is performed
+    y = y.astype('str')
+
+    X_train, X_test, y_train, y_test = train_test_split(X, y, train_size=0.5, random_state=0)
+
+    # underlying BayesSearchCV and Optimizer are fully configurable
+    # via kwargs
+    model = SkoptEstimator(
+        search_cv_kwargs={
+            'verbose': 2, 'n_iter': 32,
+            'optimizer_kwargs': {'base_estimator': 'ET', 'n_random_starts': 31}
+        }
+    ).fit(X_train, y_train)
+
+    # use as a normal sklearn estimator
+    yp = model.predict(X_test)
+    print(model.score(X_test, y_test))
+    # print best parameters found
+    print(model.estimator.best_params_)
+
+    """
+    def __init__(self, search_cv_kwargs = {}):
+        self.estimator = None
+        self.kwargs = search_cv_kwargs
+
+    def fit(self, X, y):
+        """Find a model that fits best to the dataset (X, y).
+
+        Parameters
+        ----------
+        X : array-like or sparse matrix, shape = [n_samples, n_features]
+            The training input samples. If a column is of str type, it is
+            assumed to be categorical column, as well if it cannot be
+            converted to float. If a column can be converted to float,
+            it is considered of numeric type.
+
+        y : array-like, shape = [n_samples]
+            The target values. If the values are of type 'str', they are
+            assumed to be categorical values. Otherwise if they can be
+            converted to float, they are assumed to be of numerical type.
+        """
+
+        # how to deal with different columns
+        trsf_selector = {
+            TYPE_FLOAT: lambda i: ColumnSelector(i),
+            TYPE_FLOAT_MISSING: lambda i: make_pipeline(ColumnSelector(i), Imputer()),
+            TYPE_CATEGORY: lambda i: make_pipeline(ColumnSelector(i), OneHotEncoder()),
+        }
+
+        # feature encoder / decoder
+        features = make_union(*[
+            trsf_selector[column_type(c)](i) for i, c in enumerate(X.T)
+        ])
+
+        output_type = column_type(y)
+
+        pipe_selector = {
+            TYPE_FLOAT: regression_pipeline,
+            TYPE_CATEGORY: classification_pipeline
+        }
+
+        model = pipe_selector[output_type](features, self.kwargs)
+
+        model.fit(X, y)
+        self.estimator = model
+        return self
+
+    def predict(self, X):
+        if self.estimator is None:
+            raise AssertionError(
+                "self.model is None, please call .fit before you call .predict"
+            )
+        return self.estimator.predict(X)
+
+    def score(self, X, y):
+        if self.estimator is None:
+            raise AssertionError(
+                "self.model is None, please call .fit before you call .score"
+            )
+        return self.estimator.score(X, y)
