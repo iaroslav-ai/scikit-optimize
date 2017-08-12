@@ -503,7 +503,12 @@ class BayesSearchCV(sk_model_sel.BaseSearchCV):
         # record performances with different points
         refit = self.refit
         self.refit = False  # do not fit yet - will be fit later
-        self._fit(X, y, groups, params_dict)
+        
+        if hasattr(super(Foo, self), '_fit'):
+            super(Foo, self)._fit(X, y, groups, params_dict) 
+        else:
+            super(Foo, self).fit(X, y, groups, params_dict)
+        
         self.refit = refit
 
         # merge existing and new cv_results_
