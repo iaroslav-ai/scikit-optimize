@@ -727,3 +727,6 @@ class BayesSearchCV(sklearn.model_selection._search.BaseSearchCV):
                     groups=groups, n_jobs=n_jobs_adjusted
                 )
                 n_iter -= n_jobs
+
+                if self.verbose > 10:
+                    print("%s iters left, best score: %s" % (n_iter, self.best_score_))
